@@ -33,13 +33,13 @@ spec:
     migrateDatabaseJob:
       useHelmHooks: false
     dags:
-      persistance:
+      persistence:
         enabled: False
       gitSync:
         enabled: True
         repo: https://github.com/mateen-dar/airflow-dags.git
         branch: main
-        maxFailiures: 0
+        maxFailures: 0
         subPath: ""
         wait: 0
       
