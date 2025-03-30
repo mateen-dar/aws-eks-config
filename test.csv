@@ -2,9 +2,6 @@ import json
 from collections import defaultdict, OrderedDict
 from xhtml2pdf import pisa
 
-import json
-from collections import defaultdict, OrderedDict
-from xhtml2pdf import pisa
 
 def generate_tapestry_html_with_analysis(
     main_data,
@@ -12,16 +9,19 @@ def generate_tapestry_html_with_analysis(
     output_file="TapestryPerformanceReport.html",
     *,
     category_sort_func=None,                # sorts categories in the bottom table
-    row_background_by_attribute_func=None   # pick row background color based on the row's ATTRIBUTE value
+    row_background_by_attribute_func=None,   # pick row background color based on the row's ATTRIBUTE value
+    row_background_by_category_func=None,    # pick row background color based on the row's ATTRIBUTE_CATEGORY value
+    row_background_by_trend_func=None       # pick row background color based on growth trend
 ):
     """
     Two-table layout:
       - top table => header only
       - bottom table => data
-    Also:
-      1) category_sort_func(cat_name) -> sort_key  (defines the order of categories in bottom table)
-      2) row_background_by_attribute_func(attr_value) -> "red"/"tan"/"#FFCC00"/None/etc.
-         This color is used as inline style "background-color:" for the row, overriding nth-child defaults.
+    
+    Column order:
+      - All TRAILING columns come first (from longest period to shortest)
+      - Any other columns in the middle
+      - All MINUS columns last (from longest period to shortest)
     """
 
     ########################################################################
@@ -30,69 +30,93 @@ def generate_tapestry_html_with_analysis(
     rename_map = {
         "ATTRIBUTE_CATEGORY": "Category",
         # Example yoy growth
-        "MINUS_1_WEEK_YOY_GROWTH":         "Trailing 1 Week YOY",
-        "MINUS_2_WEEK_YOY_GROWTH":         "Trailing 2 Week YOY",
-        "MINUS_3_WEEK_YOY_GROWTH":         "Trailing 3 Week YOY",
-        "MINUS_4_WEEK_YOY_GROWTH":         "Minus 4 Week YOY",
-        "TRAILING_4_WEEK_YOY_GROWTH":      "Trailing 4 Week YOY",
-        "TRAILING_13_WEEK_YOY_GROWTH":     "Trailing 13 Week YOY",
+        "MINUS_1_WEEK_YOY_GROWTH":         " 1 Week",
+        "MINUS_2_WEEK_YOY_GROWTH":         " 2 Week",
+        "MINUS_3_WEEK_YOY_GROWTH":         " 3 Week",
+        "MINUS_4_WEEK_YOY_GROWTH":         " 4 Week",
+        "TRAILING_4_WEEK_YOY_GROWTH":      " 4 Week",
+        "TRAILING_13_WEEK_YOY_GROWTH":     " 13 Week",
         # Growth contribution
-        "MINUS_1_WEEK_GROWTH_CONTRIBUTION":"Trailing 1 Week",
-        "MINUS_2_WEEK_GROWTH_CONTRIBUTION":"Trailing 2 Week",
-        "MINUS_3_WEEK_GROWTH_CONTRIBUTION":"Trailing 3 Week",
-        "MINUS_4_WEEK_GROWTH_CONTRIBUTION":"Minus 4 Week",
-        "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": "Trailing 4 Week",
-        "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": "Trailing 13 Week",
+        "MINUS_1_WEEK_GROWTH_CONTRIBUTION":" 1 Week",
+        "MINUS_2_WEEK_GROWTH_CONTRIBUTION":" 2 Week",
+        "MINUS_3_WEEK_GROWTH_CONTRIBUTION":" 3 Week",
+        "MINUS_4_WEEK_GROWTH_CONTRIBUTION":" 4 Week",
+        "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": " 4 Week",
+        "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": " 13 Week",
         # "ATTRIBUTE": "Item" # rename if you want
     }
 
-    ########################################################################
-    # 2) reorder columns => "TRAILING" => left, "MINUS" => right, else => mid
-    ########################################################################
-    def column_sort_key(col: str):
-        c_up = col.upper()
-        if "TRAILING" in c_up:
-            return (0,)
-        elif "MINUS" in c_up:
-            return (2,)
-        else:
-            return (1,)
 
-    def get_column_groups(rows):
-        # gather all non-REGION columns
-        all_cols = set()
-        for r in rows:
-            for k in r:
-                if k!="REGION":
-                    all_cols.add(k)
-        all_cols = list(all_cols)
-
-        has_cat = ("ATTRIBUTE_CATEGORY" in all_cols)
-        if has_cat:
-            all_cols.remove("ATTRIBUTE_CATEGORY")
-
-        has_attr = ("ATTRIBUTE" in all_cols)
-        if has_attr:
-            all_cols.remove("ATTRIBUTE")
-
-        growth_cols = []
-        contrib_cols = []
-        for c in all_cols:
-            up = c.upper()
-            if "GROWTH_CONTRIBUTION" in up:
-                contrib_cols.append(c)
-            elif "GROWTH" in up:
-                growth_cols.append(c)
-
-        # reorder them
-        growth_cols.sort(key=column_sort_key)
-        contrib_cols.sort(key=column_sort_key)
-
+    # New function to extract and organize columns by type and prefix
+    def organize_columns(rows):
+        # 1. Extract all column names from data
+        all_columns = set()
+        for row in rows:
+            for key in row:
+                if key != "REGION":
+                    all_columns.add(key)
+        all_columns = list(all_columns)
+        
+        # 2. Separate basic metadata columns
+        has_category = "ATTRIBUTE_CATEGORY" in all_columns
+        has_attribute = "ATTRIBUTE" in all_columns
+        if has_category:
+            all_columns.remove("ATTRIBUTE_CATEGORY")
+        if has_attribute:
+            all_columns.remove("ATTRIBUTE")
+        
+        # 3. Separate YOY and CONTRIBUTION columns
+        yoy_columns = [col for col in all_columns if "YOY_GROWTH" in col]
+        contribution_columns = [col for col in all_columns if "GROWTH_CONTRIBUTION" in col]
+        
+        # 4. Further separate by prefix within each type
+        # YOY columns
+        trailing_yoy = [col for col in yoy_columns if "TRAILING" in col]
+        minus_yoy = [col for col in yoy_columns if "MINUS" in col]
+        other_yoy = [col for col in yoy_columns if "TRAILING" not in col and "MINUS" not in col]
+        
+        # CONTRIBUTION columns
+        trailing_contrib = [col for col in contribution_columns if "TRAILING" in col]
+        minus_contrib = [col for col in contribution_columns if "MINUS" in col]
+        other_contrib = [col for col in contribution_columns if "TRAILING" not in col and "MINUS" not in col]
+        
+        # 5. Sort each group by week number
+        def week_sort_key(col):
+            if "13_WEEK" in col:
+                return 0
+            elif "4_WEEK" in col:
+                return 1
+            elif "3_WEEK" in col:
+                return 2
+            elif "2_WEEK" in col:
+                return 3
+            elif "1_WEEK" in col:
+                return 4
+            else:
+                return 5
+        
+        trailing_yoy.sort(key=week_sort_key)
+        minus_yoy.sort(key=week_sort_key)
+        other_yoy.sort(key=week_sort_key)
+        trailing_contrib.sort(key=week_sort_key)
+        minus_contrib.sort(key=week_sort_key)
+        other_contrib.sort(key=week_sort_key)
+        
+        # 6. Combine in desired order
+        ordered_yoy = trailing_yoy + other_yoy + minus_yoy
+        ordered_contrib = trailing_contrib + other_contrib + minus_contrib
+        
         return {
-            "has_attribute_category": has_cat,
-            "has_attribute": has_attr,
-            "growth_cols": growth_cols,
-            "growth_contrib_cols": contrib_cols
+            "has_category": has_category,
+            "has_attribute": has_attribute,
+            "yoy_columns": ordered_yoy,
+            "contribution_columns": ordered_contrib,
+            "trailing_yoy": trailing_yoy,
+            "minus_yoy": minus_yoy,
+            "trailing_contrib": trailing_contrib,
+            "minus_contrib": minus_contrib,
+            "other_yoy": other_yoy,
+            "other_contrib": other_contrib
         }
 
     from collections import defaultdict
@@ -121,7 +145,12 @@ def generate_tapestry_html_with_analysis(
   <meta charset="UTF-8">
   <title>Tapestry Performance Analysis Report</title>
   <style>
-    /* top table => 10px font, bigger row height, no outer border */
+    /* Global font style */
+    body, table, h1, td, th {
+      font-family: Arial, sans-serif;
+    }
+    
+    /* top table => 10px font, smaller row height, no outer border */
     .top-table {
       border: none !important;
       border-collapse: separate;
@@ -129,9 +158,10 @@ def generate_tapestry_html_with_analysis(
       font-size: 10px;
     }
     .top-table thead th {
-      padding: 10px 4px !important;
+      padding: 5px 4px !important; /* Reduced from 10px to 5px */
       white-space: nowrap;
       overflow: hidden;
+      line-height: 1.1; /* Added line-height to make rows more compact */
     }
     .border-cell {
       border: 1px solid #999 !important;
@@ -143,8 +173,14 @@ def generate_tapestry_html_with_analysis(
       color: white !important;
       white-space: nowrap;
     }
+    .trends-header {
+      background-color: #e6e6e6;
+      font-weight: bold;
+      text-align: center;
+      border: 1px solid #999 !important;
+    }
 
-    /* bottom table => 8px font, 2px row padding, no special coloring via nth-child => we rely on user’s config */
+    /* bottom table => 8px font, 2px row padding, no special coloring via nth-child => we rely on user's config */
     .bottom-table {
       border-collapse: collapse;
       width: 100%;
@@ -179,6 +215,50 @@ def generate_tapestry_html_with_analysis(
       text-align: center;
       white-space: nowrap;
     }
+    
+    /* Style for attribute cells */
+    .attribute-cell {
+      font-weight: bold;
+    }
+    
+    /* Styled list items for analysis section - with left color bands */
+    li.positive {
+      border-left: 4px solid #27ae60; /* Green left border */
+      padding-left: 8px;
+      margin-bottom: 5px;
+      color: black; /* Keep text black */
+    }
+    
+    li.negative {
+      border-left: 4px solid #c0392b; /* Red left border */
+      padding-left: 8px;
+      margin-bottom: 5px;
+      color: black; /* Keep text black */
+    }
+    
+    li.neutral {
+      border-left: 4px solid #3498db; /* Blue left border */
+      padding-left: 8px;
+      margin-bottom: 5px;
+      color: black; /* Keep text black */
+    }
+    
+    li.highlight {
+      border-left: 4px solid #f39c12; /* Orange left border */
+      padding-left: 8px;
+      margin-bottom: 5px;
+      color: black; /* Keep text black */
+      background-color: #fffde7; /* Very light yellow background */
+    }
+    
+    /* Styling for sub-lists */
+    li > ul {
+      margin-top: 5px;
+    }
+    
+    li > ul > li {
+      margin-bottom: 3px;
+    }
   </style>
 </head>
 <body>
@@ -198,12 +278,56 @@ def generate_tapestry_html_with_analysis(
     # We'll define a major sections set for the 3px gap row
     MAJOR_SECTIONS = {"People","Place","Price","Product","Promo","Total"}
 
+    # Helper function to add color coding to list items in HTML
+    def color_code_list_items(html_content):
+        """
+        Adds color-coding classes to list items in HTML content based on content.
+        
+        Rules:
+        - Items containing percentage increases (e.g., "20% growth", "increased by 15%") get class="positive"
+        - Items containing percentage decreases (e.g., "10% decline", "decreased by 5%") get class="negative" 
+        - Items containing product names or key metrics get class="highlight"
+        - Other informational items get class="neutral"
+        
+        Returns: Modified HTML content
+        """
+        if not html_content:
+            return html_content
+        
+        # Simplified approach using string replacement (for demonstration)
+        # In practice, you might want to use a proper HTML parser for more robust processing
+        
+        # Look for list items and apply classes based on content
+        lines = html_content.split('\n')
+        for i, line in enumerate(lines):
+            if '<li>' in line:
+                # Add positive class for growth, increase terms
+                if any(term in line.lower() for term in ['growth', 'increase', 'higher', 'up ', 'grew', 'expanded']):
+                    lines[i] = line.replace('<li>', '<li class="positive">')
+                
+                # Add negative class for decline, decrease terms
+                elif any(term in line.lower() for term in ['decline', 'decrease', 'lower', 'down', 'reduced', 'fell']):
+                    lines[i] = line.replace('<li>', '<li class="negative">')
+                
+                # Add highlight class for product names and core metrics
+                elif any(term in line for term in ['Core LG', 'Tabby', 'Teri', 'Brooklyn', 'Retail', 'eComm', 'GenZ', 
+                                                  'Total Growth', 'Contribution', 'Recent Growth', 'Week YOY']):
+                    lines[i] = line.replace('<li>', '<li class="highlight">')
+                
+                # Add neutral class for everything else
+                else:
+                    lines[i] = line.replace('<li>', '<li class="neutral">')
+        
+        return '\n'.join(lines)
+
     for region_name in sorted_regions:
         # Summaries
         html_parts.append(f'<h1>Summary for {region_name}</h1>\n')
         snippet = region_to_analysis.get(region_name,"")
         if snippet:
-            html_parts.append(snippet + "\n")
+            # Apply color coding to the analysis HTML snippet
+            colored_snippet = color_code_list_items(snippet)
+            html_parts.append(colored_snippet + "\n")
 
         # page break after snippet
         html_parts.append("<pdf:nextpage />\n")
@@ -217,34 +341,94 @@ def generate_tapestry_html_with_analysis(
             html_parts.append("<pdf:nextpage />\n")
             continue
 
-        col_info = get_column_groups(rows)
-        has_cat = col_info["has_attribute_category"]
+        # Get organized columns
+        col_info = organize_columns(rows)
+        has_cat = col_info["has_category"]
         has_attr = col_info["has_attribute"]
-        gcols = col_info["growth_cols"]
-        ccols = col_info["growth_contrib_cols"]
+        yoy_cols = col_info["yoy_columns"]
+        contrib_cols = col_info["contribution_columns"]
+        
+        # Extract specific column groups for the Recent Trends header
+        trailing_yoy = col_info["trailing_yoy"]
+        minus_yoy = col_info["minus_yoy"]
+        other_yoy = col_info["other_yoy"]
+        trailing_contrib = col_info["trailing_contrib"]
+        minus_contrib = col_info["minus_contrib"]
+        other_contrib = col_info["other_contrib"]
+        
+        # Debug: Print column order
+        print(f"\nRegion: {region_name}")
+        print("YOY columns order:")
+        for i, col in enumerate(yoy_cols):
+            print(f"  {i+1}. {col}")
+        print("Contribution columns order:")
+        for i, col in enumerate(contrib_cols):
+            print(f"  {i+1}. {col}")
 
-        # ---------- TOP TABLE => 2-row thead only ----------
+        # Calculate column counts
+        trailing_yoy_count = len(trailing_yoy)
+        trailing_contrib_count = len(trailing_contrib)
+        minus_yoy_count = len(minus_yoy)
+        minus_contrib_count = len(minus_contrib)
+
+        # ---------- TOP TABLE => headers ----------
         html_parts.append('<table class="top-table">\n  <thead>\n')
-        # row 1 => group headings
+        
+        # row 1 => Main headers: Growth, Growth Contribution
         html_parts.append("    <tr>\n")
         if has_cat:
-            html_parts.append('<th class="no-border-cell" rowspan="2">Category</th>\n')
+            html_parts.append('<th class="no-border-cell" rowspan="3">Category</th>\n')
         if has_attr:
-            html_parts.append('<th class="no-border-cell" rowspan="2">Attribute</th>\n')
-        if gcols:
-            html_parts.append(f'<th class="border-cell" colspan="{len(gcols)}">Growth</th>\n')
-        if ccols:
-            html_parts.append(f'<th class="border-cell" colspan="{len(ccols)}">Growth Contribution</th>\n')
+            html_parts.append('<th class="no-border-cell" rowspan="3">Attribute</th>\n')
+        
+        if yoy_cols:
+            html_parts.append(f'<th class="border-cell" colspan="{len(yoy_cols)}">Growth</th>\n')
+        if contrib_cols:
+            html_parts.append(f'<th class="border-cell" colspan="{len(contrib_cols)}">Growth Contribution</th>\n')
+        html_parts.append("    </tr>\n")
+        
+        # row 2 => Split trailing and recent trends
+        html_parts.append("    <tr>\n")
+        
+        # Trailing Growth columns
+        if trailing_yoy_count > 0:
+            html_parts.append(f'<th class="border-cell" colspan="{trailing_yoy_count}"></th>\n')
+        
+        # Recent Trends (Minus Growth columns)
+        if minus_yoy_count > 0:
+            html_parts.append(f'<th class="trends-header" colspan="{minus_yoy_count}">Recent Trends</th>\n')
+        
+        # Trailing Growth Contribution columns
+        if trailing_contrib_count > 0:
+            html_parts.append(f'<th class="border-cell" colspan="{trailing_contrib_count}"></th>\n')
+        
+        # Recent Trends (Minus Growth Contribution columns)
+        if minus_contrib_count > 0:
+            html_parts.append(f'<th class="trends-header" colspan="{minus_contrib_count}">Recent Trends</th>\n')
+        
         html_parts.append("    </tr>\n")
 
-        # row2 => subcolumns
-        html_parts.append("    <tr>\n")
-        for gc in gcols:
-            lbl = rename_map.get(gc, gc)
-            html_parts.append(f'<th class="border-cell">{lbl}</th>\n')
-        for cc in ccols:
-            lbl = rename_map.get(cc, cc)
-            html_parts.append(f'<th class="border-cell">{lbl}</th>\n')
+        # row 3 => Column labels with sky blue background (except leftmost cells)
+        html_parts.append('    <tr>\n')
+        
+        # Category and Attribute columns remain with white background
+        if has_cat:
+            # This cell is already handled via rowspan in row 1
+            pass
+        if has_attr:
+            # This cell is already handled via rowspan in row 1
+            pass
+            
+        # YOY columns - sky blue background
+        for yoy in yoy_cols:
+            lbl = rename_map.get(yoy, yoy)
+            html_parts.append(f'<th class="border-cell" style="background-color: #87CEEB;">{lbl}</th>\n')
+            
+        # Contribution columns - sky blue background
+        for contrib in contrib_cols:
+            lbl = rename_map.get(contrib, contrib)
+            html_parts.append(f'<th class="border-cell" style="background-color: #87CEEB;">{lbl}</th>\n')
+            
         html_parts.append("    </tr>\n  </thead>\n")
         html_parts.append("</table>\n")
 
@@ -261,7 +445,7 @@ def generate_tapestry_html_with_analysis(
         cat_items_list = list(cat_map.items())
         cat_items_list.sort(key=lambda x: category_sort_func(x[0]))
 
-        total_cols = (1 if has_cat else 0) + (1 if has_attr else 0) + len(gcols) + len(ccols)
+        total_cols = (1 if has_cat else 0) + (1 if has_attr else 0) + len(yoy_cols) + len(contrib_cols)
 
         for idx_cat, (cat_val, cat_rows) in enumerate(cat_items_list):
             # Insert 3px gap row if not first and cat_val is in MAJOR_SECTIONS
@@ -270,35 +454,50 @@ def generate_tapestry_html_with_analysis(
 
             group_size = len(cat_rows)
             for i, row_data in enumerate(cat_rows):
-                # compute row style if row_background_by_attribute_func is given
-                row_style = ""
-                if row_background_by_attribute_func is not None:
-                    attr_val = row_data.get("ATTRIBUTE","")
-                    color = row_background_by_attribute_func(attr_val)  # e.g. "lightgreen", "#FFCC00", etc.
-                    if color:  # if not None or empty
-                        row_style = f' style="background-color:{color};"'
-
-                html_parts.append(f"    <tr{row_style}>\n")
+                html_parts.append("    <tr>\n")
 
                 if has_cat and i==0:
                     html_parts.append(
                         f'      <td class="attribute-category-cell" rowspan="{group_size}">{cat_val}</td>\n'
                     )
+                
+                # Determine cell style for data cells (not category column)
+                cell_style = ""
+                
+                # Priority 1: Trend-based coloring (highest priority)
+                if row_background_by_trend_func is not None:
+                    color = row_background_by_trend_func(row_data)
+                    if color:  # if not None or empty
+                        cell_style = f' style="background-color:{color};"'
+                
+                # Priority 2: Category-based coloring
+                elif row_background_by_category_func is not None:
+                    color = row_background_by_category_func(cat_val)
+                    if color:  # if not None or empty
+                        cell_style = f' style="background-color:{color};"'
+                        
+                # Priority 3: Attribute-based coloring (lowest priority)
+                elif row_background_by_attribute_func is not None:
+                    attr_val = row_data.get("ATTRIBUTE","")
+                    color = row_background_by_attribute_func(attr_val)
+                    if color:  # if not None or empty
+                        cell_style = f' style="background-color:{color};"'
+
                 if has_attr:
                     attr_txt = row_data.get("ATTRIBUTE","")
-                    html_parts.append(f'      <td>{attr_txt}</td>\n')
+                    html_parts.append(f'      <td{cell_style} class="attribute-cell">{attr_txt}</td>\n')
 
-                # growth columns in order
-                for gc in gcols:
-                    val = row_data.get(gc)
+                # YOY growth columns in order - standard styling (no sky blue in bottom table)
+                for yoy in yoy_cols:
+                    val = row_data.get(yoy)
                     val_str = format_as_percent(val)
-                    html_parts.append(f'      <td>{val_str}</td>\n')
+                    html_parts.append(f'      <td{cell_style}>{val_str}</td>\n')
 
-                # growth contrib
-                for cc in ccols:
-                    val = row_data.get(cc)
+                # Contribution columns in order - standard styling (no sky blue in bottom table)
+                for contrib in contrib_cols:
+                    val = row_data.get(contrib)
                     val_str = format_as_percent(val)
-                    html_parts.append(f'      <td>{val_str}</td>\n')
+                    html_parts.append(f'      <td{cell_style}>{val_str}</td>\n')
 
                 html_parts.append("    </tr>\n")
 
@@ -317,23 +516,18 @@ def generate_tapestry_html_with_analysis(
         f.write(final_html)
 
     return final_html
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  
-
+# Define a function that returns a color based on category
+def color_by_category(category):
+        category_colors = {
+            "People": "#E6F2FF",   # Light blue
+            "Product": "#FFF2E6",  # Light orange
+            "Price": "#F2FFE6",    # Light green
+            "Place": "#FFE6F2",    # Light pink
+            "Promo": "#E6FFFF",    # Light cyan
+            "Total": "#FFFFCC"     # Light yellow
+        }
+        return category_colors.get(category)
+    
 a=[
   {
       "REGION": "North America",
@@ -1455,8 +1649,48 @@ a=[
 
 b= [{"REGION": "North America", "ANALYSIS": "<h3>Core Performance Metrics</h3> <ul> <li>Total Growth (13-week): 22.7%</li> <li>Recent Growth (4-week): 21.1%</li> <li>Latest Week: 20.9%</li> </ul> <h3>Channel Performance</h3> <p>Digital Commerce:</p> <ul> <li>Retail eComm: 65.7% growth (5.4% contribution)</li> <li>Outlet eComm: 6.9% growth (2.0% contribution)</li> </ul> <p>Physical Retail:</p> <ul> <li>Retail Stores: 47% growth (6.0% contribution)</li> <li>Outlet Stores: 18.6% growth (9.3% contribution)</li> </ul> <h3>Customer Segmentation</h3> <ul> <li>Existing Customers: 25.4% growth (13.1% contribution) <ul> <li>GenZ: 70.8% growth</li> <li>Non-GenZ: 21.0% growth</li> </ul> </li> <li>New Customers: 29.9% growth (7.8% contribution) <ul> <li>GenZ: 40.6% growth</li> <li>Non-GenZ: 28.3% growth</li> </ul> </li> </ul> <h3>Product Performance</h3> <ul> <li>Brooklyn: 299.9% growth</li> <li>Core LG: 87.5% growth</li> <li>Teri: 121% growth</li> <li>Tabby: 80.1% growth</li> </ul>"}, {"REGION": "Greater China", "ANALYSIS": "<h3>Core Performance Metrics</h3> <ul> <li>Total Growth (13-week): 111.5%</li> <li>Recent Growth (4-week): 193.2%</li> <li>Latest Week: 273.9%</li> </ul> <h3>Channel Performance</h3> <p>Digital Commerce:</p> <ul> <li>Outlet eComm: 166.1% growth (47.9% contribution)</li> <li>Retail eComm: 149.2% growth (35.7% contribution)</li> </ul> <p>Physical Retail:</p> <ul> <li>Retail Stores: 66.5% growth (13.7% contribution)</li> <li>Outlet Stores: 53.3% growth (14.2% contribution)</li> </ul> <h3>Price Segment Performance</h3> <ul> <li>\$200-\$400: 134.3% growth (68.7% contribution)</li> <li>\$400+: 101.9% growth (15.6% contribution)</li> <li>\$150-\$200: 68.8% growth (9.9% contribution)</li> </ul> <h3>Product Performance</h3> <ul> <li>Rowan: 1140% growth</li> <li>Core LG: 301% growth</li> <li>Teri: 251.5% growth</li> <li>Tabby: 212.3% growth</li> </ul>"}, {"REGION": "Cross-Regional Insights", "ANALYSIS": "<h3>Key Growth Drivers</h3> <ul> <li>Digital Transformation: <ul> <li>Strong eCommerce growth across regions</li> <li>Greater China leading digital adoption</li> <li>North America showing balanced channel mix</li> </ul> </li> <li>Product Strategy: <ul> <li>Core LG strength across markets</li> <li>New launches showing exceptional results</li> <li>Premium products driving growth</li> </ul> </li> <li>Price Architecture: <ul> <li>Premium segments leading growth</li> <li>Higher price points showing strength</li> <li>Consistent luxury positioning</li> </ul> </li> </ul> <h3>Regional Distinctions</h3> <ul> <li>Greater China: <ul> <li>Higher growth velocity</li> <li>Digital-first success</li> <li>Strong premium segment adoption</li> </ul> </li> <li>North America: <ul> <li>Stable growth patterns</li> <li>Strong GenZ engagement</li> <li>Balanced channel performance</li> </ul> </li> </ul>"}, {"REGION": "Strategic Recommendations", "ANALYSIS": "<h3>Growth Opportunities</h3> <ul> <li>Digital Excellence: <ul> <li>Accelerate eCommerce investment</li> <li>Enhance digital experience</li> <li>Strengthen omnichannel integration</li> </ul> </li> <li>Product Innovation: <ul> <li>Scale successful launches</li> <li>Maintain premium positioning</li> <li>Focus on core product strength</li> </ul> </li> <li>Customer Strategy: <ul> <li>Expand GenZ engagement</li> <li>Enhance loyalty programs</li> <li>Improve digital engagement</li> </ul> </li> </ul> <h3>Risk Management</h3> <ul> <li>Monitor market volatility</li> <li>Balance channel growth</li> <li>Maintain pricing discipline</li> <li>Ensure sustainable expansion</li> </ul>"} ]
 
+def color_by_long_term_trend(row_data):
+    """Colors based on latest week vs. 13-week average"""
+    if ("MINUS_1_WEEK_YOY_GROWTH" in row_data and 
+        "TRAILING_13_WEEK_YOY_GROWTH" in row_data):
+        
+        recent_growth = row_data["MINUS_1_WEEK_YOY_GROWTH"]
+        average_growth = row_data["TRAILING_13_WEEK_YOY_GROWTH"]
+        
+        # Color outperforming trends light blue
+        if recent_growth > average_growth:
+            return "#E6F2FF"  # Light blue for outperforming trend
+        else:
+            return "#FFFFFF"  # White for underperforming trend
+    
+    return None
+def color_by_growth_trend(row_data):
+    """Colors based on week-over-week trend"""
+    if ("MINUS_1_WEEK_YOY_GROWTH" in row_data and 
+        "MINUS_2_WEEK_YOY_GROWTH" in row_data):
+        
+        current_week = row_data["MINUS_1_WEEK_YOY_GROWTH"]
+        previous_week = row_data["MINUS_2_WEEK_YOY_GROWTH"]
+        
+        # Color increasing trends light blue
+        if current_week > 0 and current_week > previous_week:
+            return "#E6F2FF"  # Light blue for increasing trend
+        else:
+            return "#FFFFFF"  # White for decreasing or flat trend
+    
+    return None
 
-html_string  = generate_tapestry_html_with_analysis(a,b)
 
-with open("new_updated.pdf", "wb") as pdf_file:
-        pisa_status = pisa.CreatePDF(html_string, dest=pdf_file)
+html_content = generate_tapestry_html_with_analysis(
+        main_data=a,
+        analysis_data=b,
+        output_file="category_colored_report.html",
+        row_background_by_category_func=color_by_category,
+        row_background_by_trend_func=color_by_growth_trend
+    )
+    
+    # Generate PDF
+with open("category_colored_report.pdf", "wb") as pdf_file:
+        pisa_status = pisa.CreatePDF(html_content, dest=pdf_file)
+    
+
