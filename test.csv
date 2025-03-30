@@ -1,0 +1,1462 @@
+import json
+from collections import defaultdict, OrderedDict
+from xhtml2pdf import pisa
+
+import json
+from collections import defaultdict, OrderedDict
+from xhtml2pdf import pisa
+
+def generate_tapestry_html_with_analysis(
+    main_data,
+    analysis_data,
+    output_file="TapestryPerformanceReport.html",
+    *,
+    category_sort_func=None,                # sorts categories in the bottom table
+    row_background_by_attribute_func=None   # pick row background color based on the row's ATTRIBUTE value
+):
+    """
+    Two-table layout:
+      - top table => header only
+      - bottom table => data
+    Also:
+      1) category_sort_func(cat_name) -> sort_key  (defines the order of categories in bottom table)
+      2) row_background_by_attribute_func(attr_value) -> "red"/"tan"/"#FFCC00"/None/etc.
+         This color is used as inline style "background-color:" for the row, overriding nth-child defaults.
+    """
+
+    ########################################################################
+    # 1) rename_map for columns
+    ########################################################################
+    rename_map = {
+        "ATTRIBUTE_CATEGORY": "Category",
+        # Example yoy growth
+        "MINUS_1_WEEK_YOY_GROWTH":         "Trailing 1 Week YOY",
+        "MINUS_2_WEEK_YOY_GROWTH":         "Trailing 2 Week YOY",
+        "MINUS_3_WEEK_YOY_GROWTH":         "Trailing 3 Week YOY",
+        "MINUS_4_WEEK_YOY_GROWTH":         "Minus 4 Week YOY",
+        "TRAILING_4_WEEK_YOY_GROWTH":      "Trailing 4 Week YOY",
+        "TRAILING_13_WEEK_YOY_GROWTH":     "Trailing 13 Week YOY",
+        # Growth contribution
+        "MINUS_1_WEEK_GROWTH_CONTRIBUTION":"Trailing 1 Week",
+        "MINUS_2_WEEK_GROWTH_CONTRIBUTION":"Trailing 2 Week",
+        "MINUS_3_WEEK_GROWTH_CONTRIBUTION":"Trailing 3 Week",
+        "MINUS_4_WEEK_GROWTH_CONTRIBUTION":"Minus 4 Week",
+        "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": "Trailing 4 Week",
+        "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": "Trailing 13 Week",
+        # "ATTRIBUTE": "Item" # rename if you want
+    }
+
+    ########################################################################
+    # 2) reorder columns => "TRAILING" => left, "MINUS" => right, else => mid
+    ########################################################################
+    def column_sort_key(col: str):
+        c_up = col.upper()
+        if "TRAILING" in c_up:
+            return (0,)
+        elif "MINUS" in c_up:
+            return (2,)
+        else:
+            return (1,)
+
+    def get_column_groups(rows):
+        # gather all non-REGION columns
+        all_cols = set()
+        for r in rows:
+            for k in r:
+                if k!="REGION":
+                    all_cols.add(k)
+        all_cols = list(all_cols)
+
+        has_cat = ("ATTRIBUTE_CATEGORY" in all_cols)
+        if has_cat:
+            all_cols.remove("ATTRIBUTE_CATEGORY")
+
+        has_attr = ("ATTRIBUTE" in all_cols)
+        if has_attr:
+            all_cols.remove("ATTRIBUTE")
+
+        growth_cols = []
+        contrib_cols = []
+        for c in all_cols:
+            up = c.upper()
+            if "GROWTH_CONTRIBUTION" in up:
+                contrib_cols.append(c)
+            elif "GROWTH" in up:
+                growth_cols.append(c)
+
+        # reorder them
+        growth_cols.sort(key=column_sort_key)
+        contrib_cols.sort(key=column_sort_key)
+
+        return {
+            "has_attribute_category": has_cat,
+            "has_attribute": has_attr,
+            "growth_cols": growth_cols,
+            "growth_contrib_cols": contrib_cols
+        }
+
+    from collections import defaultdict
+    region_to_rows = defaultdict(list)
+    for row in main_data:
+        region = row.get("REGION","Unknown Region")
+        region_to_rows[region].append(row)
+
+    region_to_analysis = {}
+    for item in analysis_data:
+        reg = item.get("REGION","Unknown Region")
+        region_to_analysis[reg] = item.get("ANALYSIS","")
+
+    sorted_regions = sorted(region_to_rows.keys())
+
+    # if user didn't pass a category_sort_func, default to alphabetical
+    if category_sort_func is None:
+        def category_sort_func(cat_name):
+            return cat_name
+
+    html_parts = []
+
+    html_parts.append("""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Tapestry Performance Analysis Report</title>
+  <style>
+    /* top table => 10px font, bigger row height, no outer border */
+    .top-table {
+      border: none !important;
+      border-collapse: separate;
+      margin-bottom: 2px;
+      font-size: 10px;
+    }
+    .top-table thead th {
+      padding: 10px 4px !important;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+    .border-cell {
+      border: 1px solid #999 !important;
+      white-space: nowrap;
+    }
+    .no-border-cell {
+      border: none !important;
+      background: white !important;
+      color: white !important;
+      white-space: nowrap;
+    }
+
+    /* bottom table => 8px font, 2px row padding, no special coloring via nth-child => we rely on user’s config */
+    .bottom-table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 8px;
+      table-layout: auto;
+      margin-bottom: 20px;
+    }
+    .bottom-table tr.section-gap td {
+      border: none !important;
+      height: 3px;
+      background: white;
+      padding: 0;
+    }
+    .bottom-table th,
+    .bottom-table td {
+      border: 1px solid #999;
+      padding: 2px 4px;
+      text-align: left;
+      vertical-align: middle;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+
+    h1 {
+      margin-top: 40px;
+      text-align: center;
+    }
+    .attribute-category-cell {
+      background: #7C391E; 
+      color: white;
+      font-weight: bold;
+      text-align: center;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+
+<h1 style="text-align:center;">Tapestry Performance Analysis Report</h1>
+<div id="tablesContainer">
+""")
+
+    # a helper to format numeric fields as percent
+    def format_as_percent(val):
+        if val is None:
+            return ""
+        if isinstance(val, (int,float)):
+            return f"{val*100:.2f}%"
+        return str(val)
+
+    # We'll define a major sections set for the 3px gap row
+    MAJOR_SECTIONS = {"People","Place","Price","Product","Promo","Total"}
+
+    for region_name in sorted_regions:
+        # Summaries
+        html_parts.append(f'<h1>Summary for {region_name}</h1>\n')
+        snippet = region_to_analysis.get(region_name,"")
+        if snippet:
+            html_parts.append(snippet + "\n")
+
+        # page break after snippet
+        html_parts.append("<pdf:nextpage />\n")
+
+        # "Details" heading
+        html_parts.append(f'<h1>Details for {region_name}</h1>\n')
+
+        rows = region_to_rows[region_name]
+        if not rows:
+            html_parts.append("<!-- No data for this region -->\n")
+            html_parts.append("<pdf:nextpage />\n")
+            continue
+
+        col_info = get_column_groups(rows)
+        has_cat = col_info["has_attribute_category"]
+        has_attr = col_info["has_attribute"]
+        gcols = col_info["growth_cols"]
+        ccols = col_info["growth_contrib_cols"]
+
+        # ---------- TOP TABLE => 2-row thead only ----------
+        html_parts.append('<table class="top-table">\n  <thead>\n')
+        # row 1 => group headings
+        html_parts.append("    <tr>\n")
+        if has_cat:
+            html_parts.append('<th class="no-border-cell" rowspan="2">Category</th>\n')
+        if has_attr:
+            html_parts.append('<th class="no-border-cell" rowspan="2">Attribute</th>\n')
+        if gcols:
+            html_parts.append(f'<th class="border-cell" colspan="{len(gcols)}">Growth</th>\n')
+        if ccols:
+            html_parts.append(f'<th class="border-cell" colspan="{len(ccols)}">Growth Contribution</th>\n')
+        html_parts.append("    </tr>\n")
+
+        # row2 => subcolumns
+        html_parts.append("    <tr>\n")
+        for gc in gcols:
+            lbl = rename_map.get(gc, gc)
+            html_parts.append(f'<th class="border-cell">{lbl}</th>\n')
+        for cc in ccols:
+            lbl = rename_map.get(cc, cc)
+            html_parts.append(f'<th class="border-cell">{lbl}</th>\n')
+        html_parts.append("    </tr>\n  </thead>\n")
+        html_parts.append("</table>\n")
+
+        # ---------- BOTTOM TABLE => data only ----------
+        html_parts.append('<table class="bottom-table">\n  <tbody>\n')
+
+        # group by category
+        cat_map = {}
+        for r in rows:
+            cat_val = r.get("ATTRIBUTE_CATEGORY","No Category")
+            cat_map.setdefault(cat_val,[]).append(r)
+
+        # sort categories using user-provided function
+        cat_items_list = list(cat_map.items())
+        cat_items_list.sort(key=lambda x: category_sort_func(x[0]))
+
+        total_cols = (1 if has_cat else 0) + (1 if has_attr else 0) + len(gcols) + len(ccols)
+
+        for idx_cat, (cat_val, cat_rows) in enumerate(cat_items_list):
+            # Insert 3px gap row if not first and cat_val is in MAJOR_SECTIONS
+            if idx_cat>0 and cat_val in MAJOR_SECTIONS:
+                html_parts.append(f'    <tr class="section-gap"><td colspan="{total_cols}"></td></tr>\n')
+
+            group_size = len(cat_rows)
+            for i, row_data in enumerate(cat_rows):
+                # compute row style if row_background_by_attribute_func is given
+                row_style = ""
+                if row_background_by_attribute_func is not None:
+                    attr_val = row_data.get("ATTRIBUTE","")
+                    color = row_background_by_attribute_func(attr_val)  # e.g. "lightgreen", "#FFCC00", etc.
+                    if color:  # if not None or empty
+                        row_style = f' style="background-color:{color};"'
+
+                html_parts.append(f"    <tr{row_style}>\n")
+
+                if has_cat and i==0:
+                    html_parts.append(
+                        f'      <td class="attribute-category-cell" rowspan="{group_size}">{cat_val}</td>\n'
+                    )
+                if has_attr:
+                    attr_txt = row_data.get("ATTRIBUTE","")
+                    html_parts.append(f'      <td>{attr_txt}</td>\n')
+
+                # growth columns in order
+                for gc in gcols:
+                    val = row_data.get(gc)
+                    val_str = format_as_percent(val)
+                    html_parts.append(f'      <td>{val_str}</td>\n')
+
+                # growth contrib
+                for cc in ccols:
+                    val = row_data.get(cc)
+                    val_str = format_as_percent(val)
+                    html_parts.append(f'      <td>{val_str}</td>\n')
+
+                html_parts.append("    </tr>\n")
+
+        html_parts.append("  </tbody>\n</table>\n")
+
+        # page break
+        html_parts.append("<pdf:nextpage />\n")
+
+    # close
+    html_parts.append("</div>\n</body>\n</html>\n")
+
+    final_html = "".join(html_parts)
+
+    # write to file
+    with open(output_file, "w", encoding="utf-8") as f:
+        f.write(final_html)
+
+    return final_html
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  
+
+a=[
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "People",
+      "ATTRIBUTE": "Employee",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.2718288922,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.3197303369,
+      "MINUS_4_WEEK_YOY_GROWTH": -0.01633557367,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.6711041485,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.6781740307,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.02518459529,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.004095850895,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.006314903856,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": -0.0002272300976,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.01164577496,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.01384942444,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.0006806808627
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "People",
+      "ATTRIBUTE": "Existing",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.254407163,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.232650535,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.14467161,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.314275525,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.2555598661,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.2194146507,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.1310737668,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.1303238551,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.07966415258,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.1783076017,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.1438397417,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.1229451609
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "People",
+      "ATTRIBUTE": "Existing GenZ",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.7079042952,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.7066750977,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.4646706383,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.9394069963,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.7987485346,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.6437250454,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.03235894041,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.03338584319,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.02221504747,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.04393056737,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.03858468837,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.02969298046
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "People",
+      "ATTRIBUTE": "Existing Non-GenZ",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.2102544748,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.1889900758,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.1142477087,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.2581212215,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.2045633511,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.1813518999,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.0987148264,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.09693801186,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.05744910512,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.1343770343,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.1052550533,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.09325218046
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "People",
+      "ATTRIBUTE": "New",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.2995475438,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.2640940358,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.1219757122,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.3437608911,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.2997300579,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.2990873124,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.07759060669,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.06829284384,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.03216862426,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.08977604358,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.07692641114,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.07568422672
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "People",
+      "ATTRIBUTE": "New GenZ",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.4055689399,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.595833713,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.2629162924,
+      "MINUS_3_WEEK_YOY_GROWTH": 2.685648647,
+      "MINUS_2_WEEK_YOY_GROWTH": 1.082792862,
+      "MINUS_1_WEEK_YOY_GROWTH": -0.3486825651,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.01395249234,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.01498718428,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.00879278593,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.03802071672,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.02543859816,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": -0.01001709539
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "People",
+      "ATTRIBUTE": "New Non-GenZ",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.2833098271,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.2283488257,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.1015076537,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.2095345469,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.2208272303,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.3820456555,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.06363811436,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.05330565956,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.02337583833,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.05175532686,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.05148781298,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.08570132211
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "People",
+      "ATTRIBUTE": "Uncaptured",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.06982034392,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.03957645236,
+      "MINUS_4_WEEK_YOY_GROWTH": -0.06080283874,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.1153507111,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.05736299323,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.06098576884,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.01471070425,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.006391057067,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": -0.01044015509,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.01777873783,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.009182919474,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.009732671144
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "Place",
+      "ATTRIBUTE": "Outlet Stores",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.1858103728,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.1772792088,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.01899106381,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.2692964386,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.2204963157,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.2188389882,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.09332670666,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.08594355532,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.009694069554,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.1250849781,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.1040575024,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.107350994
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "Place",
+      "ATTRIBUTE": "Outlet eComm",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.0695329021,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.02621551075,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.06993009575,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.04992152839,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.0544734689,
+      "MINUS_1_WEEK_YOY_GROWTH": -0.06356790301,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.01998614678,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.008210445882,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.02131601734,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.01568233737,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.01732161266,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": -0.02008526621
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "Place",
+      "ATTRIBUTE": "Retail Stores",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.4697303717,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.5703035805,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.3967035583,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.6977753916,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.561936238,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.6261907486,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.0601841696,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.06480995676,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.04340782081,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.07819285526,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.06688596515,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.07146226157
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "Place",
+      "ATTRIBUTE": "Retail eComm",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.6568394816,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.5924512513,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.3551863588,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.7185671038,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.6098165496,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.6339710289,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.05397390561,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.05235870185,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.02674748395,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.07854798732,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.05553341652,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.05031475027
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "Price",
+      "ATTRIBUTE": "AUR",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.1207511951,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.1375941029,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.1057516819,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.1338076112,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.1222566245,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.1794215819,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "Price",
+      "ATTRIBUTE": "a. < $100",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.05729612555,
+      "TRAILING_4_WEEK_YOY_GROWTH": -0.03972250824,
+      "MINUS_4_WEEK_YOY_GROWTH": -0.1158971752,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.01383219279,
+      "MINUS_2_WEEK_YOY_GROWTH": -0.001112872944,
+      "MINUS_1_WEEK_YOY_GROWTH": -0.04591454955,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.01847343808,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": -0.01331430388,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": -0.04024139507,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.004453373238,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": -0.0003687086696,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": -0.01557604581
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "Price",
+      "ATTRIBUTE": "b. $100-$150",
+      "TRAILING_13_WEEK_YOY_GROWTH": -0.01954324876,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.04941817191,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.001041955691,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.1126174784,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.1082559559,
+      "MINUS_1_WEEK_YOY_GROWTH": -0.008560801436,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": -0.005780709719,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.01358459447,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.0002893370592,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.02966471288,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.02869789909,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": -0.00249956948
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "Price",
+      "ATTRIBUTE": "c. $150-$200",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.303784357,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.4284192543,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.2812879632,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.4836373338,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.4594674938,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.4871043975,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.05688950213,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.0807090466,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.05140240782,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.09231256319,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.08988846964,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.09000151161
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "Price",
+      "ATTRIBUTE": "d. $200-$400",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.8276864046,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.5610111979,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.4316709562,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.5930372949,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.5388645191,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.6807085917,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.1186870892,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.08054841008,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.05987567244,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.09038410728,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.08029357284,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.09195329539
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "Price",
+      "ATTRIBUTE": "e. $400+",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.7668030178,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.8591064858,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.5561762925,
+      "MINUS_3_WEEK_YOY_GROWTH": 1.130930679,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.7681900204,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.923050206,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.039201609,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.04979491254,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.02983936941,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.08069340148,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.04528726383,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.04516354793
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "Balance of Categories",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.410873091,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.3494348078,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.1517130591,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.4677232802,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.4281822125,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.3678217811,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.03285557171,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.02902562976,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.01304263328,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.0388480203,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.03495714461,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.03000653588
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "Balance of WLGs",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.05794295551,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.07887946063,
+      "MINUS_4_WEEK_YOY_GROWTH": -0.0206205039,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.2263965977,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.06820976931,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.05239882765,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.02922686611,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.03830600645,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": -0.009930890928,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.1080359337,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.03405273185,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.0253837276
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "Brooklyn",
+      "TRAILING_13_WEEK_YOY_GROWTH": 299.919479981,
+      "TRAILING_4_WEEK_YOY_GROWTH": 191.499519779,
+      "MINUS_4_WEEK_YOY_GROWTH": 86.821254707,
+      "MINUS_3_WEEK_YOY_GROWTH": 156.217764561,
+      "MINUS_2_WEEK_YOY_GROWTH": 285.293625841,
+      "MINUS_1_WEEK_YOY_GROWTH": 879.529783752,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.03766987944,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.0354051163,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.02899806455,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.03665944936,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.03756419609,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.03847128611
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "City Tote",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.4525340527,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.7845088651,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.4454456192,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.9543751539,
+      "MINUS_2_WEEK_YOY_GROWTH": 1.425642625,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.5509586017,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.006299107156,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.008294034283,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.00512193339,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.009493605752,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.01203376717,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.006753524682
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "Core LG",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.8746312795,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.9173885087,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.687214317,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.849757183,
+      "MINUS_2_WEEK_YOY_GROWTH": 1.102078953,
+      "MINUS_1_WEEK_YOY_GROWTH": 1.055503886,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.1459558797,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.1526401669,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.1161554205,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.1548952868,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.1752022832,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.1648788101
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "FTW",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.08160189566,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.03790919602,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.04539443814,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.07096933785,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.03201743071,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.01210760452,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.006671722123,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.003552466733,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.003766284786,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.006241157597,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.003117237087,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.001284082493
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "Klare",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.3615037026,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.5636811329,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.3923451349,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.4898174523,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.7459317493,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.7009569712,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.009557513867,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.01145725784,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.009305244221,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.01095526029,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.01353571133,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.01205543778
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "MLG",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.03629173735,
+      "TRAILING_4_WEEK_YOY_GROWTH": -0.1184674503,
+      "MINUS_4_WEEK_YOY_GROWTH": -0.1835390326,
+      "MINUS_3_WEEK_YOY_GROWTH": -0.1007922404,
+      "MINUS_2_WEEK_YOY_GROWTH": -0.05937953292,
+      "MINUS_1_WEEK_YOY_GROWTH": -0.120933745,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.004748457974,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": -0.0159752481,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": -0.02596950004,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": -0.01361272955,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": -0.007581028218,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": -0.01632079267
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "Nolita",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.6129533023,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.4394134954,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.6323076998,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.640303949,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.3636373723,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.1955110106,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.009386077968,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.00733716465,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.009385970297,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.01009559142,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.006553381828,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.003541085652
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "RTW",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.2216475482,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.1037749186,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.1053176258,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.089963483,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.1153288706,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.1036360513,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.008012431069,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.003773638075,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.004101444014,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.00310048918,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.004050128225,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.003810376264
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "Rowan",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.2354686058,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.2487886686,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.04047813837,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.409746139,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.3879596598,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.2013098032,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.008202214372,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.008483330766,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.001563682024,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.0143354874,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.01228207889,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.006273323161
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "Tabby",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.8010438914,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.5216421908,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.3928342959,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.2484223642,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.7486694798,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.8081417958,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.03412270491,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.02863211013,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.01977233974,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.01792203869,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.03835642686,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.03793447906
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "Teri",
+      "TRAILING_13_WEEK_YOY_GROWTH": 1.210079706,
+      "TRAILING_4_WEEK_YOY_GROWTH": 1.790503267,
+      "MINUS_4_WEEK_YOY_GROWTH": 1.415973813,
+      "MINUS_3_WEEK_YOY_GROWTH": 2.065565624,
+      "MINUS_2_WEEK_YOY_GROWTH": 1.750843603,
+      "MINUS_1_WEEK_YOY_GROWTH": 1.962688942,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.04071838194,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.05303115293,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.04200818631,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.05543385393,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.05487672101,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.05984967363
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "Promo",
+      "ATTRIBUTE": "Demand Captured",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.2598796703,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.1503146076,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.100297891,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.1657930721,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.1815348815,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.1524155721,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0
+  }
+  , 
+  {
+      "REGION": "North America",
+      "ATTRIBUTE_CATEGORY": "Total",
+      "ATTRIBUTE": "Total",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.2274709286,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.2113226598,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.1011653917,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.2975081581,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.2437984967,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.2090427396,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.2274709286,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.2113226598,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.1011653917,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.2975081581,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.2437984967,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.2090427396
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "People",
+      "ATTRIBUTE": "Existing",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0,
+      "MINUS_4_WEEK_YOY_GROWTH": 0,
+      "MINUS_3_WEEK_YOY_GROWTH": 0,
+      "MINUS_2_WEEK_YOY_GROWTH": 0,
+      "MINUS_1_WEEK_YOY_GROWTH": 0,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "People",
+      "ATTRIBUTE": "Existing Non-GenZ",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0,
+      "MINUS_4_WEEK_YOY_GROWTH": 0,
+      "MINUS_3_WEEK_YOY_GROWTH": 0,
+      "MINUS_2_WEEK_YOY_GROWTH": 0,
+      "MINUS_1_WEEK_YOY_GROWTH": 0,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "People",
+      "ATTRIBUTE": "New",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0,
+      "MINUS_4_WEEK_YOY_GROWTH": 0,
+      "MINUS_3_WEEK_YOY_GROWTH": 0,
+      "MINUS_2_WEEK_YOY_GROWTH": 0,
+      "MINUS_1_WEEK_YOY_GROWTH": 0,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "People",
+      "ATTRIBUTE": "New Non-GenZ",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0,
+      "MINUS_4_WEEK_YOY_GROWTH": 0,
+      "MINUS_3_WEEK_YOY_GROWTH": 0,
+      "MINUS_2_WEEK_YOY_GROWTH": 0,
+      "MINUS_1_WEEK_YOY_GROWTH": 0,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "People",
+      "ATTRIBUTE": "Uncaptured",
+      "TRAILING_13_WEEK_YOY_GROWTH": 1.046864994,
+      "TRAILING_4_WEEK_YOY_GROWTH": 1.924149953,
+      "MINUS_4_WEEK_YOY_GROWTH": 1.35448638,
+      "MINUS_3_WEEK_YOY_GROWTH": 1.495325935,
+      "MINUS_2_WEEK_YOY_GROWTH": 1.954613505,
+      "MINUS_1_WEEK_YOY_GROWTH": 2.735251751,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 1.046864994,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 1.924149953,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 1.35448638,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 1.495325935,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 1.954613505,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 2.735251751
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "Place",
+      "ATTRIBUTE": "Outlet Stores",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.5326881081,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.07070194934,
+      "MINUS_4_WEEK_YOY_GROWTH": -0.5197540052,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.4498099218,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.3787776926,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.6592017736,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.1417024596,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.02437024933,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": -0.2477704581,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.1331970005,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.09626707558,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.1985553248
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "Place",
+      "ATTRIBUTE": "Outlet eComm",
+      "TRAILING_13_WEEK_YOY_GROWTH": 1.661105642,
+      "TRAILING_4_WEEK_YOY_GROWTH": 2.68032875,
+      "MINUS_4_WEEK_YOY_GROWTH": 3.019801039,
+      "MINUS_3_WEEK_YOY_GROWTH": 2.998078854,
+      "MINUS_2_WEEK_YOY_GROWTH": 1.201415569,
+      "MINUS_1_WEEK_YOY_GROWTH": 3.659210118,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.4791362055,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.9680531408,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.8209584652,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 1.025227864,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.557945779,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 1.412227256
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "Place",
+      "ATTRIBUTE": "Retail Stores",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.6648483272,
+      "TRAILING_4_WEEK_YOY_GROWTH": 6.645432696,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.5550686968,
+      "MINUS_3_WEEK_YOY_GROWTH": 1.407676233,
+      "MINUS_2_WEEK_YOY_GROWTH": 16.213526065,
+      "MINUS_1_WEEK_YOY_GROWTH": 9.023123739,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.1369153755,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.3185578904,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.02835861433,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.08259577015,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.9115249518,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.2921162084
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "Place",
+      "ATTRIBUTE": "Retail eComm",
+      "TRAILING_13_WEEK_YOY_GROWTH": 1.491933867,
+      "TRAILING_4_WEEK_YOY_GROWTH": 2.524160855,
+      "MINUS_4_WEEK_YOY_GROWTH": 3.807954871,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.8987702754,
+      "MINUS_2_WEEK_YOY_GROWTH": 1.744798247,
+      "MINUS_1_WEEK_YOY_GROWTH": 2.983378255,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.3574780412,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.6214589003,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.7629012729,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.2725473388,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.3929653311,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.8367850942
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "Price",
+      "ATTRIBUTE": "AUR",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.04636075241,
+      "TRAILING_4_WEEK_YOY_GROWTH": -0.02139708594,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.07795388044,
+      "MINUS_3_WEEK_YOY_GROWTH": -0.05603193957,
+      "MINUS_2_WEEK_YOY_GROWTH": -0.1865604046,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.06094908876,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "Price",
+      "ATTRIBUTE": "a. < $100",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.2510132309,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.6698204073,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.1047289821,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.5895196101,
+      "MINUS_2_WEEK_YOY_GROWTH": 2.192823877,
+      "MINUS_1_WEEK_YOY_GROWTH": 0.4121708646,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.02137609979,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.05426725118,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.008087923224,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.04073796711,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.1410363026,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.04304387009
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "Price",
+      "ATTRIBUTE": "b. $100-$150",
+      "TRAILING_13_WEEK_YOY_GROWTH": 1.422671748,
+      "TRAILING_4_WEEK_YOY_GROWTH": 2.301418208,
+      "MINUS_4_WEEK_YOY_GROWTH": 1.010571193,
+      "MINUS_3_WEEK_YOY_GROWTH": 2.020676637,
+      "MINUS_2_WEEK_YOY_GROWTH": 4.923669486,
+      "MINUS_1_WEEK_YOY_GROWTH": 2.355970853,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.1523209974,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.2479798106,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.1213006627,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.1825017327,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.4135514695,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.2887896722
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "Price",
+      "ATTRIBUTE": "c. $150-$200",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.6879968712,
+      "TRAILING_4_WEEK_YOY_GROWTH": 3.05359372,
+      "MINUS_4_WEEK_YOY_GROWTH": 2.023407145,
+      "MINUS_3_WEEK_YOY_GROWTH": 2.192114501,
+      "MINUS_2_WEEK_YOY_GROWTH": 4.462350565,
+      "MINUS_1_WEEK_YOY_GROWTH": 3.456840319,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.09879025334,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.2601808332,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.1556519023,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.1976898856,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.3554850734,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.3305357527
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "Price",
+      "ATTRIBUTE": "d. $200-$400",
+      "TRAILING_13_WEEK_YOY_GROWTH": 1.343276928,
+      "TRAILING_4_WEEK_YOY_GROWTH": 2.22537808,
+      "MINUS_4_WEEK_YOY_GROWTH": 1.512210197,
+      "MINUS_3_WEEK_YOY_GROWTH": 2.068856081,
+      "MINUS_2_WEEK_YOY_GROWTH": 1.582246113,
+      "MINUS_1_WEEK_YOY_GROWTH": 3.885665085,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.6872218709,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 1.137118113,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.8212167495,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.9928763457,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.9082321718,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 1.727720011
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "Price",
+      "ATTRIBUTE": "e. $400+",
+      "TRAILING_13_WEEK_YOY_GROWTH": 1.019275911,
+      "TRAILING_4_WEEK_YOY_GROWTH": 1.082980747,
+      "MINUS_4_WEEK_YOY_GROWTH": 1.412745186,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.3688315783,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.7090362976,
+      "MINUS_1_WEEK_YOY_GROWTH": 1.502128656,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.1555228603,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.2328941728,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.2581906566,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.09976204261,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.1403981202,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.3495945783
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "Balance of Categories",
+      "TRAILING_13_WEEK_YOY_GROWTH": 1.081104414,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.9033038674,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.7922709054,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.568715716,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.9447882165,
+      "MINUS_1_WEEK_YOY_GROWTH": 1.223536603,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.05648629596,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.0390468921,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.03515682834,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.02788151458,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.03997383536,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.04845656612
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "Balance of WLGs",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.9604361765,
+      "TRAILING_4_WEEK_YOY_GROWTH": 1.733186844,
+      "MINUS_4_WEEK_YOY_GROWTH": 1.438884291,
+      "MINUS_3_WEEK_YOY_GROWTH": 1.306961534,
+      "MINUS_2_WEEK_YOY_GROWTH": 1.461543735,
+      "MINUS_1_WEEK_YOY_GROWTH": 2.469761194,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.5191916518,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.9569134203,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.7445977996,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.6804855493,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.8976840483,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 1.376813321
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "Brooklyn",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0,
+      "MINUS_4_WEEK_YOY_GROWTH": 0,
+      "MINUS_3_WEEK_YOY_GROWTH": 0,
+      "MINUS_2_WEEK_YOY_GROWTH": 0,
+      "MINUS_1_WEEK_YOY_GROWTH": 0,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "City Tote",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.8833111713,
+      "TRAILING_4_WEEK_YOY_GROWTH": 0.8536608165,
+      "MINUS_4_WEEK_YOY_GROWTH": -0.2079173429,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.2048006885,
+      "MINUS_2_WEEK_YOY_GROWTH": 0.4083147726,
+      "MINUS_1_WEEK_YOY_GROWTH": 2.478495962,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.01033242447,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.01856180438,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": -0.004307957401,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.003977419054,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.009256120706,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.05789688225
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "Core LG",
+      "TRAILING_13_WEEK_YOY_GROWTH": 3.010104214,
+      "TRAILING_4_WEEK_YOY_GROWTH": 3.142829224,
+      "MINUS_4_WEEK_YOY_GROWTH": 3.21260178,
+      "MINUS_3_WEEK_YOY_GROWTH": 2.298161897,
+      "MINUS_2_WEEK_YOY_GROWTH": 2.072455435,
+      "MINUS_1_WEEK_YOY_GROWTH": 4.392630481,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.2932907924,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.4020344044,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.3710834126,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.304340318,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.2825827431,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.5802921405
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "FTW",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.7894271386,
+      "TRAILING_4_WEEK_YOY_GROWTH": 1.889941207,
+      "MINUS_4_WEEK_YOY_GROWTH": 1.181265279,
+      "MINUS_3_WEEK_YOY_GROWTH": 2.29237584,
+      "MINUS_2_WEEK_YOY_GROWTH": 3.703443709,
+      "MINUS_1_WEEK_YOY_GROWTH": 1.397063631,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.04657140133,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.1241559237,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.06294872795,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.146229132,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.1874736249,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.127960187
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "Klare",
+      "TRAILING_13_WEEK_YOY_GROWTH": 3.61085783,
+      "TRAILING_4_WEEK_YOY_GROWTH": 2.572700846,
+      "MINUS_4_WEEK_YOY_GROWTH": 1.898002136,
+      "MINUS_3_WEEK_YOY_GROWTH": 1.042591634,
+      "MINUS_2_WEEK_YOY_GROWTH": 7.031103341,
+      "MINUS_1_WEEK_YOY_GROWTH": 3.442594141,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.00896783083,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.0112572995,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.009959314043,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.007362487922,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.01224567651,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.01395995352
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "MLG",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.9040181092,
+      "TRAILING_4_WEEK_YOY_GROWTH": 1.747055292,
+      "MINUS_4_WEEK_YOY_GROWTH": 0.9083536788,
+      "MINUS_3_WEEK_YOY_GROWTH": 1.315866356,
+      "MINUS_2_WEEK_YOY_GROWTH": 3.041092607,
+      "MINUS_1_WEEK_YOY_GROWTH": 2.402399057,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.1241495231,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.2421320422,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.1540305808,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.2058633179,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.3274301891,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.2887432129
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "Nolita",
+      "TRAILING_13_WEEK_YOY_GROWTH": 5.1171623,
+      "TRAILING_4_WEEK_YOY_GROWTH": 4.008722757,
+      "MINUS_4_WEEK_YOY_GROWTH": 7.508642815,
+      "MINUS_3_WEEK_YOY_GROWTH": 5.593059949,
+      "MINUS_2_WEEK_YOY_GROWTH": 3.550780152,
+      "MINUS_1_WEEK_YOY_GROWTH": 1.513107704,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.03142814224,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.05204713841,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.08570466864,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.06197206277,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.02800550223,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.02970930014
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "RTW",
+      "TRAILING_13_WEEK_YOY_GROWTH": 0.6660875794,
+      "TRAILING_4_WEEK_YOY_GROWTH": 2.32093144,
+      "MINUS_4_WEEK_YOY_GROWTH": -0.03377107046,
+      "MINUS_3_WEEK_YOY_GROWTH": 1.91592241,
+      "MINUS_2_WEEK_YOY_GROWTH": 4.576824616,
+      "MINUS_1_WEEK_YOY_GROWTH": 5.376283222,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.07554241714,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.1681574982,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": -0.003369455025,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.148768142,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.2235586965,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.3174184561
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "Rowan",
+      "TRAILING_13_WEEK_YOY_GROWTH": 11.401077307,
+      "TRAILING_4_WEEK_YOY_GROWTH": 10.995769099,
+      "MINUS_4_WEEK_YOY_GROWTH": 6.889396831,
+      "MINUS_3_WEEK_YOY_GROWTH": 59.231301737,
+      "MINUS_2_WEEK_YOY_GROWTH": 11.677656826,
+      "MINUS_1_WEEK_YOY_GROWTH": 11.150074008,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.04615122177,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.06860134713,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.07140726836,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.09527286771,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.05671679338,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.06052331165
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "Tabby",
+      "TRAILING_13_WEEK_YOY_GROWTH": 2.123431736,
+      "TRAILING_4_WEEK_YOY_GROWTH": 2.054366752,
+      "MINUS_4_WEEK_YOY_GROWTH": 3.00762476,
+      "MINUS_3_WEEK_YOY_GROWTH": 0.7274702168,
+      "MINUS_2_WEEK_YOY_GROWTH": 1.129096741,
+      "MINUS_1_WEEK_YOY_GROWTH": 3.249547694,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.131785589,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.1277217036,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.1311267379,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.05334056139,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.09600959735,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.1887741275
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "Product",
+      "ATTRIBUTE": "Teri",
+      "TRAILING_13_WEEK_YOY_GROWTH": 2.515452664,
+      "TRAILING_4_WEEK_YOY_GROWTH": 2.781200412,
+      "MINUS_4_WEEK_YOY_GROWTH": 1.06444194,
+      "MINUS_3_WEEK_YOY_GROWTH": 2.274713858,
+      "MINUS_2_WEEK_YOY_GROWTH": 3.049610208,
+      "MINUS_1_WEEK_YOY_GROWTH": 4.939023863,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 0.02767562175,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 0.05676022477,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 0.0257220378,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 0.04534197452,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 0.04319686568,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 0.1063666666
+  }
+  , 
+  {
+      "REGION": "Greater China",
+      "ATTRIBUTE_CATEGORY": "Total",
+      "ATTRIBUTE": "Total",
+      "TRAILING_13_WEEK_YOY_GROWTH": 1.115232082,
+      "TRAILING_4_WEEK_YOY_GROWTH": 1.932440181,
+      "MINUS_4_WEEK_YOY_GROWTH": 1.364447894,
+      "MINUS_3_WEEK_YOY_GROWTH": 1.513567974,
+      "MINUS_2_WEEK_YOY_GROWTH": 1.958703137,
+      "MINUS_1_WEEK_YOY_GROWTH": 2.739683884,
+      "TRAILING_13_WEEK_GROWTH_CONTRIBUTION": 1.115232082,
+      "TRAILING_4_WEEK_GROWTH_CONTRIBUTION": 1.932440181,
+      "MINUS_4_WEEK_GROWTH_CONTRIBUTION": 1.364447894,
+      "MINUS_3_WEEK_GROWTH_CONTRIBUTION": 1.513567974,
+      "MINUS_2_WEEK_GROWTH_CONTRIBUTION": 1.958703137,
+      "MINUS_1_WEEK_GROWTH_CONTRIBUTION": 2.739683884
+  }
+]
+
+
+b= [{"REGION": "North America", "ANALYSIS": "<h3>Core Performance Metrics</h3> <ul> <li>Total Growth (13-week): 22.7%</li> <li>Recent Growth (4-week): 21.1%</li> <li>Latest Week: 20.9%</li> </ul> <h3>Channel Performance</h3> <p>Digital Commerce:</p> <ul> <li>Retail eComm: 65.7% growth (5.4% contribution)</li> <li>Outlet eComm: 6.9% growth (2.0% contribution)</li> </ul> <p>Physical Retail:</p> <ul> <li>Retail Stores: 47% growth (6.0% contribution)</li> <li>Outlet Stores: 18.6% growth (9.3% contribution)</li> </ul> <h3>Customer Segmentation</h3> <ul> <li>Existing Customers: 25.4% growth (13.1% contribution) <ul> <li>GenZ: 70.8% growth</li> <li>Non-GenZ: 21.0% growth</li> </ul> </li> <li>New Customers: 29.9% growth (7.8% contribution) <ul> <li>GenZ: 40.6% growth</li> <li>Non-GenZ: 28.3% growth</li> </ul> </li> </ul> <h3>Product Performance</h3> <ul> <li>Brooklyn: 299.9% growth</li> <li>Core LG: 87.5% growth</li> <li>Teri: 121% growth</li> <li>Tabby: 80.1% growth</li> </ul>"}, {"REGION": "Greater China", "ANALYSIS": "<h3>Core Performance Metrics</h3> <ul> <li>Total Growth (13-week): 111.5%</li> <li>Recent Growth (4-week): 193.2%</li> <li>Latest Week: 273.9%</li> </ul> <h3>Channel Performance</h3> <p>Digital Commerce:</p> <ul> <li>Outlet eComm: 166.1% growth (47.9% contribution)</li> <li>Retail eComm: 149.2% growth (35.7% contribution)</li> </ul> <p>Physical Retail:</p> <ul> <li>Retail Stores: 66.5% growth (13.7% contribution)</li> <li>Outlet Stores: 53.3% growth (14.2% contribution)</li> </ul> <h3>Price Segment Performance</h3> <ul> <li>\$200-\$400: 134.3% growth (68.7% contribution)</li> <li>\$400+: 101.9% growth (15.6% contribution)</li> <li>\$150-\$200: 68.8% growth (9.9% contribution)</li> </ul> <h3>Product Performance</h3> <ul> <li>Rowan: 1140% growth</li> <li>Core LG: 301% growth</li> <li>Teri: 251.5% growth</li> <li>Tabby: 212.3% growth</li> </ul>"}, {"REGION": "Cross-Regional Insights", "ANALYSIS": "<h3>Key Growth Drivers</h3> <ul> <li>Digital Transformation: <ul> <li>Strong eCommerce growth across regions</li> <li>Greater China leading digital adoption</li> <li>North America showing balanced channel mix</li> </ul> </li> <li>Product Strategy: <ul> <li>Core LG strength across markets</li> <li>New launches showing exceptional results</li> <li>Premium products driving growth</li> </ul> </li> <li>Price Architecture: <ul> <li>Premium segments leading growth</li> <li>Higher price points showing strength</li> <li>Consistent luxury positioning</li> </ul> </li> </ul> <h3>Regional Distinctions</h3> <ul> <li>Greater China: <ul> <li>Higher growth velocity</li> <li>Digital-first success</li> <li>Strong premium segment adoption</li> </ul> </li> <li>North America: <ul> <li>Stable growth patterns</li> <li>Strong GenZ engagement</li> <li>Balanced channel performance</li> </ul> </li> </ul>"}, {"REGION": "Strategic Recommendations", "ANALYSIS": "<h3>Growth Opportunities</h3> <ul> <li>Digital Excellence: <ul> <li>Accelerate eCommerce investment</li> <li>Enhance digital experience</li> <li>Strengthen omnichannel integration</li> </ul> </li> <li>Product Innovation: <ul> <li>Scale successful launches</li> <li>Maintain premium positioning</li> <li>Focus on core product strength</li> </ul> </li> <li>Customer Strategy: <ul> <li>Expand GenZ engagement</li> <li>Enhance loyalty programs</li> <li>Improve digital engagement</li> </ul> </li> </ul> <h3>Risk Management</h3> <ul> <li>Monitor market volatility</li> <li>Balance channel growth</li> <li>Maintain pricing discipline</li> <li>Ensure sustainable expansion</li> </ul>"} ]
+
+
+html_string  = generate_tapestry_html_with_analysis(a,b)
+
+with open("new_updated.pdf", "wb") as pdf_file:
+        pisa_status = pisa.CreatePDF(html_string, dest=pdf_file)
