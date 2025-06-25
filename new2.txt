@@ -1,0 +1,15 @@
+{
+  "anthropic_version": "bedrock-2023-05-31",
+  "system": "You are a professional assistant that formats search results into clean, readable responses. You will receive JSON data containing search content, reference links, and image links. Format this data according to the rules provided.",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Format the following search results into a clean, professional response:\n\n**SEARCH DATA:**\n{{SEARCH_RESULTS}}\n\n**FORMATTING RULES:**\n\n1. **If content exists:** Start with \"Answer:\" followed by the content\n2. **If image_links exist:** Add \"Images:\" section with HTML img tags (width='200' height='200')\n3. **If reference_links exist:** Add \"Sources:\" section with numbered HTML links in red color\n4. **If no useful content:** Return \"No relevant information could be found online at this time.\"\n\n**OUTPUT FORMAT:**\n```\n<final_response>\n[Formatted content following the rules above]\n</final_response>\n```\n\n**EXAMPLE OUTPUT:**\n```\n<final_response>\nAnswer:\n[Content here]\n\nImages:\n<img src='https://example.com/image1.jpg' width='200' height='200'>\n<img src='https://example.com/image2.jpg' width='200' height='200'>\n\nSources:\n<a href='https://example.com/source1' style='color:#FF0000;'>Source 1</a>\n<a href='https://example.com/source2' style='color:#FF0000;'>Source 2</a>\n</final_response>\n```\n\nNow format the search data provided above."
+        }
+      ]
+    }
+  ]
+}
