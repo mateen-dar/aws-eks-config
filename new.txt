@@ -1,0 +1,111 @@
+def format_final_response(search_results):
+    """Format the search results using Claude for post-processing"""
+    
+    # Convert search results to string format for the prompt
+    search_data = json.dumps(search_results, indent=2)
+    
+    prompt_template = '''Format the following search results into a clean, professional response:
+
+**SEARCH DATA:**
+{search_data}
+
+**FORMATTING RULES:**
+
+1. **If content exists:** Start with "Answer:" followed by the content
+2. **If image_links exist:** Add "Images:" section with HTML img tags (width='200' height='200')
+3. **If reference_links exist:** Add "Sources:" section with numbered HTML links in red color
+4. **If no useful content:** Return "No relevant information could be found online at this time."
+
+**OUTPUT FORMAT:**
+```
+<final_response>
+[Formatted content following the rules above]
+</final_response>
+```
+
+**EXAMPLE OUTPUT:**
+```
+<final_response>
+Answer:
+[Content here]
+
+Images:
+<img src='https://example.com/image1.jpg' width='200' height='200'>
+<img src='https://example.com/image2.jpg' width='200' height='200'>
+
+Sources:
+<a href='https://example.com/source1' style='color:#FF0000;'>Source 1</a>
+<a href='https://example.com/source2' style='color:#FF0000;'>Source 2</a>
+</final_response>
+```
+
+Now format the search data provided above.'''
+
+    formatted_prompt = prompt_template.format(search_data=search_data)
+    
+    body = json.dumps({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 2000,
+        "temperature": 0.1,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": formatted_prompt
+                    }
+                ]
+            }
+        ]
+    })
+    
+    try:
+        response = brt.invoke_model(
+            body=body, 
+            modelId='us.anthropic.claude-3-5-haiku-20241022-v1:0'  # Use Haiku for faster formatting
+        )
+        response_body = json.loads(response.get('body').read())
+        formatted_response = response_body['content'][0]['text']
+        
+        # Extract content between <final_response> tags
+        if '<final_response>' in formatted_response and '</final_response>' in formatted_response:
+            start = formatted_response.find('<final_response>') + len('<final_response>')
+            end = formatted_response.find('</final_response>')
+            return formatted_response[start:end].strip()
+        else:
+            return formatted_response
+            
+    except Exception as e:
+        log.error(f"Error formatting response: {e}")
+        # Fallback to basic formatting
+        return format_basic_response(search_results)
+
+def format_basic_response(search_results):
+    """Fallback formatting if Claude formatting fails"""
+    response_parts = []
+    
+    if search_results.get('content') and search_results['content'].strip():
+        response_parts.append(f"Answer:\n{search_results['content']}")
+    
+    if search_results.get('image_links'):
+        images_html = []
+        for i, img_url in enumerate(search_results['image_links'], 1):
+            images_html.append(f"<img src='{img_url}' width='200' height='200'>")
+        if images_html:
+            response_parts.append(f"Images:\n" + "\n".join(images_html))
+    
+    if search_results.get('reference_links'):
+        sources_html = []
+        for i, url in enumerate(search_results['reference_links'], 1):
+            sources_html.append(f"<a href='{url}' style='color:#FF0000;'>Source {i}</a>")
+        if sources_html:
+            response_parts.append(f"Sources:\n" + "\n".join(sources_html))
+    
+    if not response_parts:
+        return "No relevant information could be found online at this time."
+    
+    return "\n\n".join(response_parts)
+
+
+    formatted_response = format_final_response(final_output)
